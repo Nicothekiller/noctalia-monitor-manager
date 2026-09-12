@@ -15,6 +15,9 @@
   "mode": "Mode",
   "scale": "Scale",
   "position": "Position",
+  "mirror": "Mirror",
+  "mirror_off": "Off (extend)",
+  "mirroring_src": "mirrors {src}",
   "enabled": "Enabled",
   "custom_x": "X",
   "custom_y": "Y",
@@ -30,5 +33,7 @@
   "status_reverted": "Reverted to snapshot.",
   "status_nothing_to_revert": "Nothing to revert.",
   "err_copy_failed": "Copy to clipboard failed.",
-  "err_no_hyprctl": "Could not spawn hyprctl — is Hyprland running?"
+  "err_no_hyprctl": "Could not spawn hyprctl — is Hyprland running?",
+  "err_bad_name": "Invalid monitor name — not applied.",
+  "warn_mirror_target": "Mirror target {target} not available — skipped."
 }

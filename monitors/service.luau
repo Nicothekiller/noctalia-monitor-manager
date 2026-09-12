@@ -3,7 +3,10 @@
 --
 -- Publishes (via noctalia.state):
 --   monitors.list       array of { name, focused, disabled, width, height,
---                         refreshRate, x, y, scale, modes[] }
+--                         refreshRate, x, y, scale, modes[], mirroredFrom }
+--                         (`mirroredFrom` is the source output name or nil;
+--                         hyprctl reports it as `mirrorOf`, which is "none"
+--                         or a monitor *id* string, resolved via the id field.)
 --   monitors.workspaces array of { id, name, monitor }
 --   monitors.error      string or nil
 -- Consumes:
@@ -35,18 +38,40 @@ local function setError(msg)
   noctalia.state.set("monitors.error", msg)
 end
 
+-- Snapshot/extend mode: resolve the live float geometry against the
+-- reported availableModes (same 0.5 Hz tolerance the panel uses), because
+-- raw floats like 120.003 rarely reproduce an exact mode string and a
+-- non-existent mode would fail the revert apply.
+local function resolveMode(mon)
+  if (mon.width or 0) <= 0 or (mon.height or 0) <= 0 then
+    return "preferred"
+  end
+  local prefix = string.format("%dx%d@", mon.width, mon.height)
+  for _, mode in ipairs(mon.modes or {}) do
+    if string.sub(mode, 1, #prefix) == prefix and (mon.refreshRate or 0) > 0 then
+      local rate = tonumber(string.sub(mode, #prefix + 1))
+      if rate ~= nil and math.abs(rate - mon.refreshRate) < 0.5 then
+        return mode
+      end
+    end
+  end
+  return "preferred"
+end
+
 local function buildSnippetFromState(mon)
   if mon.disabled then
     return string.format('hl.monitor({ output = "%s", disabled = true })', mon.name)
   end
-  local mode = "preferred"
-  if mon.width > 0 and mon.height > 0 then
-    mode = string.format("%dx%d@%s", mon.width, mon.height, tostring(mon.refreshRate))
+  if mon.mirroredFrom ~= nil and mon.mirroredFrom ~= "" then
+    return string.format('hl.monitor({ output = "%s", mirror = "%s" })', mon.name, mon.mirroredFrom)
   end
+  local mode = resolveMode(mon)
   -- Always send disabled = false: re-enabling a previously disabled output
   -- requires it explicitly, omitting the field is not enough.
+  -- Always send mirror = "": a plain rule without the mirror field does NOT
+  -- clear an active mirror (verified live), only mirror = "" unmirrors.
   return string.format(
-    'hl.monitor({ output = "%s", mode = "%s", position = "%dx%d", scale = %s, disabled = false })',
+    'hl.monitor({ output = "%s", mode = "%s", position = "%dx%d", scale = %s, mirror = "", disabled = false })',
     mon.name,
     mode,
     mon.x,
@@ -102,6 +127,13 @@ local function fetch()
       return
     end
     local list = {}
+    -- mirrorOf is "none" or a monitor id string: resolve ids to names first.
+    local idToName = {}
+    for _, m in ipairs(data) do
+      if type(m.name) == "string" and m.id ~= nil then
+        idToName[tostring(m.id)] = m.name
+      end
+    end
     for _, m in ipairs(data) do
       if type(m.name) == "string" then
         local modes = {}
@@ -125,6 +157,7 @@ local function fetch()
           y = m.y or 0,
           scale = m.scale or 1,
           modes = modes,
+          mirroredFrom = idToName[tostring(m.mirrorOf)],
         })
       end
     end
@@ -141,7 +174,19 @@ end
 -- works with the legacy hyprlang parser). Snippet fields are constrained-safe
 -- (connector names, WxH@rate, XxY, numbers); the argv form of runAsync
 -- (plugin_api 24) would remove even the theoretical quoting risk.
+-- Defense in depth for the `hyprctl eval '<snippet>'` shell composition:
+-- our snippets are built from fixed templates + validated names/numbers,
+-- but reject anything with shell-active or control characters outright so
+-- no path (apply, apply-all, snapshot revert) can ever execute surprises.
+local function snippetSafe(s)
+  return type(s) == "string" and string.find(s, "[\n\r`$\\]") == nil
+end
+
 local function applyOne(snippet, cb)
+  if not snippetSafe(snippet) then
+    cb(false, "unsafe snippet rejected")
+    return
+  end
   noctalia.runAsync("hyprctl eval '" .. snippet .. "'", function(res)
     if res.exitCode ~= 0 then
       local detail = res.stderr or ""
@@ -201,6 +246,10 @@ end
 local function moveWorkspace(ws, monitor)
   local id = tonumber(ws)
   if id == nil or monitor == nil or monitor == "" then
+    return
+  end
+  if string.find(monitor, "^[%w%-%._/]+$") == nil then
+    setError("move failed: invalid monitor name")
     return
   end
   local cmd = string.format('hyprctl dispatch \'hl.dsp.workspace.move({ workspace = %d, monitor = "%s" })\'', id, monitor)

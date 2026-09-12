@@ -1,11 +1,11 @@
 [[plugin]]
 id = "nic/monitors"
 name = "Monitor Manager"
-version = "0.1.0"
+version = "0.2.0"
 author = "nic"
 license = "MIT"
-icon = "monitor"
-description = "Runtime monitor setup for Hyprland: mode, scale, position and enable per output, plus moving workspaces between monitors."
+icon = "device-desktop"
+description = "Runtime monitor setup for Hyprland: mode, scale, position, enable and mirroring per output, plus moving workspaces between monitors."
 plugin_api = 9
 tags = ["monitor", "hyprland", "workspace", "utility"]
 dependencies = ["hyprctl"]

@@ -26,7 +26,11 @@ local function render()
       mark = "✕"
     end
     table.insert(parts, string.format("%s%d", mark, count))
-    table.insert(tips, string.format("%s: %dx%d s=%s (%d ws)", mon.name, mon.width, mon.height, tostring(mon.scale), count))
+    local detail = string.format("%s: %dx%d s=%s (%d ws)", mon.name, mon.width, mon.height, tostring(mon.scale), count)
+    if mon.mirroredFrom ~= nil and mon.mirroredFrom ~= "" then
+      detail = string.format("%s (%s, %d ws)", mon.name, noctalia.tr("mirroring_src", { src = mon.mirroredFrom }), count)
+    end
+    table.insert(tips, detail)
   end
   barWidget.setGlyph("device-desktop")
   barWidget.setText(table.concat(parts, " "))

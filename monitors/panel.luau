@@ -22,6 +22,14 @@ local statusMsg = noctalia.state.get("monitors.status") or noctalia.tr("status_i
 -- Per-monitor form state. Initialized from polled data, never overwritten
 -- while the monitor stays connected, so polling can't clobber edits.
 local drafts = {}
+-- Set before a user-initiated apply/revert: the next poll then re-inits
+-- those drafts from reality (converges e.g. a stale mirror select), while
+-- routine polls leave in-progress edits alone. Narrowly scoped so a single
+-- Apply doesn't wipe edits on other cards. (Tiny race: a routine poll
+-- landing mid-apply consumes the pending resync early; worst case the
+-- select stays stale until Refresh — the pre-existing behavior.)
+local resyncNames = {}
+local resyncAll = false
 -- Fallback mover selections (0-based indices into the option lists).
 local moveWsIdx = 0
 local moveMonIdx = 0
@@ -75,6 +83,8 @@ local function initDraft(mon)
     customX = cx,
     customY = cy,
     enabled = not mon.disabled,
+    -- Source output name this monitor mirrors, or "" for extend.
+    mirror = mon.mirroredFrom or "",
   }
 end
 
@@ -93,11 +103,37 @@ local function syncDrafts()
   end
 end
 
+-- Mirror target must be a connected, enabled output: mirroring a
+-- missing/disabled source hits Hyprland's silent-fallback (applies as
+-- unmirrored with no error), so validate before sending instead.
+local function mirrorTargetValid(name)
+  for _, other in ipairs(monitors) do
+    if other.name == name and not other.disabled then
+      return true
+    end
+  end
+  return false
+end
+
+local function outputNameSafe(name)
+  return type(name) == "string" and string.find(name, "^[%w%-%._/]+$") ~= nil
+end
+
 -- Builds the `hl.monitor({...})` snippet for both live apply
 -- (`hyprctl eval '<snippet>'`, via the service) and Copy-Lua.
+-- Mirror form is minimal (mode/pos/scale are inherited from the source);
+-- the extend form always carries mirror = "" because a plain rule without
+-- the mirror field does NOT clear an active mirror (verified live).
 local function buildSnippet(mon, draft)
+  local mirror = draft.mirror or ""
+  if not outputNameSafe(mon.name) or (mirror ~= "" and not outputNameSafe(mirror)) then
+    return nil
+  end
   if not draft.enabled then
     return string.format('hl.monitor({ output = "%s", disabled = true })', mon.name)
+  end
+  if mirror ~= "" and mirrorTargetValid(mirror) then
+    return string.format('hl.monitor({ output = "%s", mirror = "%s" })', mon.name, mirror)
   end
   local opts = modeOptions(mon)
   local mode = opts[draft.modeIdx + 1] or "preferred"
@@ -114,7 +150,7 @@ local function buildSnippet(mon, draft)
   local scale = math.floor((tonumber(draft.scale) or 1) * 100 + 0.5) / 100
   -- disabled = false is required explicitly when re-enabling.
   return string.format(
-    'hl.monitor({ output = "%s", mode = "%s", position = "%s", scale = %s, disabled = false })',
+    'hl.monitor({ output = "%s", mode = "%s", position = "%s", scale = %s, mirror = "", disabled = false })',
     mon.name,
     mode,
     pos,
@@ -212,6 +248,25 @@ local function monitorCard(mon)
   if mon.disabled then
     table.insert(badges, ui.label({ text = "disabled", fontSize = 12, color = "error" }))
   end
+  if mon.mirroredFrom ~= nil and mon.mirroredFrom ~= "" then
+    table.insert(badges, ui.label({ text = noctalia.tr("mirroring_src", { src = mon.mirroredFrom }), fontSize = 12, color = "primary" }))
+  end
+
+  -- Mirror targets: every other *enabled* output. Index 0 is extend (off).
+  local mirrorOpts = { noctalia.tr("mirror_off") }
+  local mirrorIdx = 0
+  for _, other in ipairs(monitors) do
+    if other.name ~= name and not other.disabled then
+      table.insert(mirrorOpts, other.name)
+      if draft.mirror == other.name then
+        mirrorIdx = #mirrorOpts - 1
+      end
+    end
+  end
+  -- Effective mirroring: a stale draft pointing at a now-missing/disabled
+  -- target falls back to the extend form (see buildSnippet), so the
+  -- controls must agree with what Apply would actually send.
+  local isMirroring = draft.mirror ~= nil and draft.mirror ~= "" and mirrorTargetValid(draft.mirror)
 
   local cardChildren = {
     ui.row({ gap = 8, align = "center" }, {
@@ -224,36 +279,56 @@ local function monitorCard(mon)
       fontSize = 12,
       color = "on_surface_variant",
     }),
-    ui.label({ text = noctalia.tr("mode"), fontSize = 12, color = "on_surface_variant" }),
+    ui.label({ text = noctalia.tr("mirror"), fontSize = 12, color = "on_surface_variant" }),
     ui.select({
+      options = mirrorOpts,
+      selectedIndex = mirrorIdx,
+      onChange = function(idx)
+        local i = tonumber(idx) or 0
+        if i == 0 then
+          drafts[name].mirror = ""
+        else
+          drafts[name].mirror = mirrorOpts[i + 1] or ""
+        end
+        render()
+      end,
+    }),
+  }
+  -- While mirroring, mode/scale/position are inherited from the source.
+  if not isMirroring then
+    table.insert(cardChildren, ui.label({ text = noctalia.tr("mode"), fontSize = 12, color = "on_surface_variant" }))
+    table.insert(cardChildren, ui.select({
       options = opts,
       selectedIndex = draft.modeIdx,
       onChange = function(idx)
         drafts[name].modeIdx = tonumber(idx) or 0
         render()
       end,
-    }),
-    ui.label({ text = string.format("%s — %s", noctalia.tr("scale"), tostring(draft.scale)), fontSize = 12, color = "on_surface_variant" }),
-    ui.slider({
+    }))
+    table.insert(cardChildren, ui.label({ text = string.format("%s — %s", noctalia.tr("scale"), tostring(draft.scale)), fontSize = 12, color = "on_surface_variant" }))
+    table.insert(cardChildren, ui.slider({
       min = 0.5, max = 3, step = 0.05, value = draft.scale,
       onChange = function(v)
         drafts[name].scale = tonumber(v) or 1
         render()
       end,
-    }),
-    ui.label({ text = noctalia.tr("position"), fontSize = 12, color = "on_surface_variant" }),
-    ui.select({
+    }))
+    table.insert(cardChildren, ui.label({ text = noctalia.tr("position"), fontSize = 12, color = "on_surface_variant" }))
+    table.insert(cardChildren, ui.select({
       options = posOpts,
       selectedIndex = draft.posIdx,
       onChange = function(idx)
         drafts[name].posIdx = tonumber(idx) or 0
         render()
       end,
-    }),
-  }
-  if posExtra ~= nil then
-    table.insert(cardChildren, posExtra)
+    }))
+    if posExtra ~= nil then
+      table.insert(cardChildren, posExtra)
+    end
   end
+  -- posExtra (custom X/Y) only exists inside the extend branch above;
+  -- drafts are preserved while mirroring, so flipping Mirror back to Off
+  -- restores the inputs.
   table.insert(cardChildren, ui.row({ gap = 12, align = "center" }, {
     ui.toggle({
       checked = draft.enabled,
@@ -268,7 +343,14 @@ local function monitorCard(mon)
       variant = "primary",
       onClick = function()
         local d = drafts[name]
-        sendCmd({ op = "apply", name = name, snippet = buildSnippet(mon, d) })
+        local snippet = buildSnippet(mon, d)
+        if snippet == nil then
+          statusMsg = noctalia.tr("err_bad_name")
+          render()
+          return
+        end
+        resyncNames[name] = true
+        sendCmd({ op = "apply", name = name, snippet = snippet })
       end,
     }),
   }))
@@ -287,7 +369,10 @@ local function copyLua()
   for _, mon in ipairs(monitors) do
     local draft = drafts[mon.name]
     if draft ~= nil then
-      table.insert(lines, buildSnippet(mon, draft))
+      local snippet = buildSnippet(mon, draft)
+      if snippet ~= nil then
+        table.insert(lines, snippet)
+      end
     end
   end
   if noctalia.copyToClipboard(table.concat(lines, "\n"), "text/plain") then
@@ -299,14 +384,43 @@ local function copyLua()
 end
 
 local function applyAll()
-  local snippets = {}
+  -- Mirror rules only resolve when the target already exists as a monitor
+  -- object: a mirror applied before its source silently falls back to
+  -- unmirrored. Emit extend rules first, mirrors second.
+  local plain, mirrors = {}, {}
+  local skipped = {}
   for _, mon in ipairs(monitors) do
     local draft = drafts[mon.name]
     if draft ~= nil then
-      table.insert(snippets, { name = mon.name, snippet = buildSnippet(mon, draft) })
+      local snippet = buildSnippet(mon, draft)
+      if snippet == nil then
+        table.insert(skipped, mon.name)
+      elseif draft.enabled and draft.mirror ~= nil and draft.mirror ~= "" then
+        if mirrorTargetValid(draft.mirror) then
+          table.insert(mirrors, { name = mon.name, snippet = snippet })
+        else
+          table.insert(skipped, mon.name)
+        end
+      else
+        table.insert(plain, { name = mon.name, snippet = snippet })
+      end
     end
   end
+  local snippets = {}
+  for _, s in ipairs(plain) do
+    table.insert(snippets, s)
+  end
+  for _, s in ipairs(mirrors) do
+    table.insert(snippets, s)
+  end
+  if #skipped > 0 then
+    statusMsg = noctalia.tr("warn_mirror_target", { target = table.concat(skipped, ", ") })
+  end
+  resyncAll = true
   sendCmd({ op = "apply_all", snippets = snippets })
+  if #skipped > 0 then
+    render()
+  end
 end
 
 function onWsDropped(payload, value)
@@ -328,6 +442,7 @@ function onRefreshClicked()
 end
 
 function onRevertClicked()
+  resyncAll = true
   sendCmd({ op = "revert" })
 end
 
@@ -454,7 +569,24 @@ end
 noctalia.state.watch("monitors.list", function(value)
   if type(value) == "table" then
     monitors = value
-    syncDrafts()
+    if resyncAll then
+      resyncAll = false
+      resyncNames = {}
+      for _, mon in ipairs(monitors) do
+        initDraft(mon)
+      end
+    else
+      for name, _ in pairs(resyncNames) do
+        for _, mon in ipairs(monitors) do
+          if mon.name == name then
+            initDraft(mon)
+            break
+          end
+        end
+      end
+      resyncNames = {}
+      syncDrafts()
+    end
     render()
   end
 end)
