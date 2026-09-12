@@ -1,0 +1,42 @@
+id = "nic/monitors"
+name = "Monitor Manager"
+version = "0.1.0"
+plugin_api = 9
+author = "nic"
+license = "MIT"
+icon = "device-desktop"
+description = "Runtime monitor setup for Hyprland: mode, scale, position and enable per output, plus moving workspaces between monitors."
+tags = ["monitor", "hyprland", "workspace", "utility"]
+dependencies = ["hyprctl"]
+
+[[setting]]
+key = "poll_ms"
+type = "int"
+label_key = "settings.poll_ms.label"
+description_key = "settings.poll_ms.description"
+default = 2000
+min = 500
+max = 10000
+
+[[setting]]
+key = "show_special"
+type = "bool"
+label_key = "settings.show_special.label"
+description_key = "settings.show_special.description"
+default = false
+
+[[widget]]
+id = "monitors"
+entry = "widget.luau"
+
+[[service]]
+id = "state"
+entry = "service.luau"
+
+[[panel]]
+id = "board"
+entry = "panel.luau"
+width = 720
+height = 600
+placement = "floating"
+position = "center"
